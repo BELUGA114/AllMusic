@@ -3,6 +3,7 @@
   "package": "com.coloryr.allmusic.client.mixins",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "BlockCommands",
     "GuiShow",
     "QuitServer",
     "Register",

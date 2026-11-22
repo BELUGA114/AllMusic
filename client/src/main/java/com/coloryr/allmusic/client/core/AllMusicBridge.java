@@ -47,6 +47,16 @@ public interface AllMusicBridge {
     void sendMessage(String data);
 
     /**
+     * 显示本地操作反馈，不记录为诊断警告。
+     */
+    void sendFeedback(String data);
+
+    /**
+     * 获取本地黑名单使用的服务器或世界标识。
+     */
+    String getServerKey();
+
+    /**
      * 获取当前音量
      *
      * @return 音量

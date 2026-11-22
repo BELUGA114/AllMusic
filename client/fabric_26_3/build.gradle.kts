@@ -2,6 +2,17 @@ plugins {
     id("net.fabricmc.fabric-loom") version Versions.fabricLoom
 }
 
+val verifyBlockCommands by tasks.registering(JavaExec::class) {
+    group = "verification"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coloryr.allmusic.client.PlayerBlockCommandsTest")
+}
+
+tasks.check { dependsOn(verifyBlockCommands, project(":client").tasks.named("verifyPlayerBlock")) }
+
+tasks.test { exclude("**/PlayerBlockCommandsTest*.class") }
+
 java.sourceCompatibility = JavaVersion.VERSION_25
 java.targetCompatibility = JavaVersion.VERSION_25
 

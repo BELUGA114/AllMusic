@@ -16,10 +16,10 @@ import org.lwjgl.openal.AL10;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
-import java.util.Objects;
 import java.util.Stack;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -30,18 +30,20 @@ public class AllMusicPlayer extends InputStream {
     private final Semaphore semaphore = new Semaphore(0);
     private final Semaphore semaphoreReload = new Semaphore(0);
 
-    private PlayTaskObj nowTask;
+    private volatile PlayTaskObj nowTask;
+    private volatile HttpGet activeRequest;
+    private volatile long generation;
     private CloseableHttpResponse response;
     private BufferedInputStream content;
-    private boolean isClose = false;
-    private boolean reload = false;
+    private volatile boolean isClose = false;
+    private volatile boolean reload = false;
     private IDecoder decoder;
-    private boolean isPlay = false;
-    private boolean wait = false;
-    private int index = -1;
+    private volatile boolean isPlay = false;
+    private volatile boolean wait = false;
+    private volatile int index = -1;
     private final IntBuffer source;
     private long local;
-    private boolean isRun;
+    private volatile boolean isRun = true;
     private boolean isChat;
     private int chatCount = 0;
 
@@ -53,7 +55,7 @@ public class AllMusicPlayer extends InputStream {
 
     public void stop() {
         isRun = false;
-        isClose = true;
+        closePlayer();
         semaphore.release();
         semaphoreReload.release();
     }
@@ -63,8 +65,9 @@ public class AllMusicPlayer extends InputStream {
     }
 
     public void timerTick() {
-        if (isPlay && nowTask != null) {
-            nowTask.time += 10;
+        PlayTaskObj task = nowTask;
+        if (isPlay && task != null && task.generation == generation) {
+            task.time = (int) Math.min(Integer.MAX_VALUE, (long) task.time + 10);
         }
     }
 
@@ -73,21 +76,32 @@ public class AllMusicPlayer extends InputStream {
     }
 
     public void setTime(int time) {
-        if (nowTask == null) {
-            return;
+        synchronized (tasks) {
+            PlayTaskObj task = tasks.isEmpty() ? nowTask : tasks.peek();
+            if (task == null || task.generation != generation) {
+                return;
+            }
+            String url = task.url;
+            closePlayer();
+            queueMusic(url, time);
         }
-        isClose = true;
-        nowTask.time = time;
-        tasks.clear();
-        tasks.push(nowTask);
-        semaphore.release();
     }
 
     public void connect() throws IOException {
         streamClose();
         HttpGet request = new HttpGet(nowTask.url);
         request.setHeader("Range", "bytes=" + local + "-");
+        synchronized (tasks) {
+            if (isCancelled()) {
+                throw new InterruptedIOException("播放任务已取消");
+            }
+            activeRequest = request;
+        }
         response = AllMusicCore.client.execute(request);
+        if (isCancelled()) {
+            response.close(CloseMode.IMMEDIATE);
+            throw new InterruptedIOException("播放任务已取消");
+        }
         int statusCode = response.getCode();
         if (statusCode < 200 || statusCode >= 400) {
             throw new IOException("Unexpected code " + statusCode);
@@ -147,11 +161,7 @@ public class AllMusicPlayer extends InputStream {
     }
 
     private void run() {
-        if (isRun) {
-            return;
-        }
-        isRun = true;
-        while (true) {
+        while (isRun) {
             try {
                 semaphore.acquire();
                 if (!isRun) {
@@ -172,49 +182,35 @@ public class AllMusicPlayer extends InputStream {
                 dequeue();
                 resetSource();
 
-                if (tasks.isEmpty()) {
-                    continue;
+                synchronized (tasks) {
+                    if (tasks.isEmpty()) {
+                        continue;
+                    }
+                    nowTask = tasks.pop();
+                    tasks.clear();
+                    isClose = false;
                 }
-
-                nowTask = tasks.pop();
-                if (nowTask == null || nowTask.url == null || nowTask.url.isEmpty()) {
-                    continue;
-                }
-                tasks.clear();
                 try {
                     local = 0;
                     connect();
                 } catch (Exception e) {
-                    e.printStackTrace();
-                    AllMusicCore.bridge.sendMessage("获取音乐失败");
+                    if (!isCancellation(e)) {
+                        e.printStackTrace();
+                        AllMusicCore.bridge.sendMessage("获取音乐失败");
+                    }
                     continue;
                 }
 
-                byte[] head = new byte[4];
-                content.mark(4);
-                content.read(head);
-                content.reset();
-
-                if (head[0] == 0 && head[1] == 0 && head[2] == 0 && head[3] == 0x1c) {
-                    decoder = new M4ADecoder(this);
-                } else if ((head[0] == 'I' && head[1] == 'D' && head[2] == '3')
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xFB)
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xFA)
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xF3)
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xF2)
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xE3)
-                        || (head[0] == (byte) 0xFF && head[1] == (byte) 0xE2)) {
-                    decoder = new Mp3Decoder(this);
-                } else {
-                    decoder = new OggDecoder(this);
-                }
-
-                if (!decoder.set()) {
-                    AllMusicCore.bridge.sendMessage("不支持这样的文件播放");
+                if (!prepareDecoder() || isCancelled()) {
                     continue;
                 }
 
-                isPlay = true;
+                synchronized (tasks) {
+                    if (isCancelled()) {
+                        continue;
+                    }
+                    isPlay = true;
+                }
 
                 int frequency = decoder.getOutputFrequency();
                 int channels = decoder.getOutputChannels();
@@ -223,13 +219,11 @@ public class AllMusicPlayer extends InputStream {
                     decoder.set(nowTask.time);
                 }
 
-                isClose = false;
-
                 while (true) {
                     if (!isRun) {
                         return;
                     }
-                    if (isClose) {
+                    if (isCancelled()) {
                         break;
                     }
                     if (!AL10.alIsSource(index)) {
@@ -241,11 +235,11 @@ public class AllMusicPlayer extends InputStream {
                             if (!isRun) {
                                 return;
                             }
-                            if (isClose) {
+                            if (isCancelled()) {
                                 break;
                             }
                             BuffPack output = decoder.decodeFrame();
-                            if (output == null) {
+                            if (output == null || isCancelled()) {
                                 break;
                             }
                             ByteBuffer byteBuffer = BufferUtils.createByteBuffer(output.len)
@@ -264,10 +258,16 @@ public class AllMusicPlayer extends InputStream {
                                     byteBuffer,
                                     frequency);
 
-                            AL10.alSourceQueueBuffers(index, buffer);
-
-                            if (AL10.alGetSourcei(index, AL10.AL_SOURCE_STATE) != AL10.AL_PLAYING) {
-                                AL10.alSourcePlay(index);
+                            // 取消与入队、启播共用锁，取消后的旧解码结果不能重新发声。
+                            synchronized (tasks) {
+                                if (isCancelled()) {
+                                    AL10.alDeleteBuffers(buffer);
+                                    break;
+                                }
+                                AL10.alSourceQueueBuffers(index, buffer);
+                                if (AL10.alGetSourcei(index, AL10.AL_SOURCE_STATE) != AL10.AL_PLAYING) {
+                                    AL10.alSourcePlay(index);
+                                }
                             }
                         }
 
@@ -277,7 +277,7 @@ public class AllMusicPlayer extends InputStream {
                         checkVolume();
                         dequeue();
                     } catch (Exception e) {
-                        if (!isClose) {
+                        if (!isCancellation(e)) {
                             e.printStackTrace();
                         }
                         break;
@@ -288,7 +288,7 @@ public class AllMusicPlayer extends InputStream {
                 decodeClose();
 
                 if (AL10.alIsSource(index)) {
-                    while (!isClose && AL10.alGetSourcei(index, AL10.AL_SOURCE_STATE) == AL10.AL_PLAYING) {
+                    while (!isCancelled() && AL10.alGetSourcei(index, AL10.AL_SOURCE_STATE) == AL10.AL_PLAYING) {
                         Thread.sleep(50);
                         checkChat();
                         checkVolume();
@@ -299,27 +299,50 @@ public class AllMusicPlayer extends InputStream {
                     resetSource();
                 }
 
-                if (reload) {
-                    wait = true;
-                    if (semaphoreReload.tryAcquire(1, TimeUnit.SECONDS)) {
-                        if (reload) {
-                            reload = false;
-                            index = -1;
-                            tasks.push(nowTask);
-                            semaphore.release();
-                            continue;
-                        }
-                    }
-                }
-
                 isPlay = false;
 
                 if (!isRun) {
                     return;
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                if (!isCancellation(e)) {
+                    e.printStackTrace();
+                    AllMusicCore.bridge.sendMessage("播放音乐失败");
+                }
+            } finally {
+                isPlay = false;
+                try {
+                    streamClose();
+                    decodeClose();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                resumeReload();
             }
+        }
+    }
+
+    private void resumeReload() {
+        if (!reload || !isRun) {
+            return;
+        }
+        wait = true;
+        try {
+            if (semaphoreReload.tryAcquire(1, TimeUnit.SECONDS)) {
+                synchronized (tasks) {
+                    if (reload && nowTask != null && nowTask.generation == generation) {
+                        reload = false;
+                        index = -1;
+                        tasks.push(nowTask);
+                        semaphore.release();
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            AllMusicCore.bridge.sendMessage("重载音频被中断");
+        } finally {
+            wait = false;
         }
     }
 
@@ -331,27 +354,81 @@ public class AllMusicPlayer extends InputStream {
     }
 
     public void closePlayer() {
-        isClose = true;
-        nowTask = null;
-        tasks.clear();
+        synchronized (tasks) {
+            generation++;
+            isClose = true;
+            isPlay = false;
+            reload = false;
+            tasks.clear();
+            if (activeRequest != null) {
+                activeRequest.cancel();
+            }
+            if (index > 0 && AL10.alIsSource(index)) {
+                AL10.alSourceStop(index);
+            }
+        }
+        semaphore.release();
     }
 
     public void setMusic(String url) {
-        if (nowTask != null && nowTask.url.equalsIgnoreCase(url)) {
-            return;
-        }
-        for (PlayTaskObj item : tasks) {
-            if (item.url.equalsIgnoreCase(url)) {
+        setMusic(url, 0);
+    }
+
+    public void setMusic(String url, int time) {
+        synchronized (tasks) {
+            if (nowTask != null && nowTask.generation == generation && nowTask.url.equals(url)) {
                 return;
             }
+            closePlayer();
+            queueMusic(url, time);
         }
+    }
 
-        closePlayer();
+    private void queueMusic(String url, int time) {
         PlayTaskObj taskObj = new PlayTaskObj();
-        taskObj.time = 0;
+        taskObj.time = Math.max(0, time);
         taskObj.url = url;
+        taskObj.generation = generation;
         tasks.push(taskObj);
         semaphore.release();
+    }
+
+    private boolean isCancelled() {
+        return !isRun || isClose || nowTask == null || nowTask.generation != generation;
+    }
+
+    private boolean isCancellation(Exception error) {
+        // 主动取消导致的网络中断不作为播放故障，其他异常仍须报告。
+        return isCancelled() && (error instanceof IOException
+                || error instanceof java.util.concurrent.CancellationException);
+    }
+
+    private boolean prepareDecoder() throws Exception {
+        byte[] head = new byte[4];
+        content.mark(4);
+        content.read(head);
+        content.reset();
+        if (isCancelled()) {
+            return false;
+        }
+        if (head[0] == 0 && head[1] == 0 && head[2] == 0 && head[3] == 0x1c) {
+            decoder = new M4ADecoder(this);
+        } else if ((head[0] == 'I' && head[1] == 'D' && head[2] == '3')
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xFB)
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xFA)
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xF3)
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xF2)
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xE3)
+                || (head[0] == (byte) 0xFF && head[1] == (byte) 0xE2)) {
+            decoder = new Mp3Decoder(this);
+        } else {
+            decoder = new OggDecoder(this);
+        }
+        if (!decoder.set()) {
+            AllMusicCore.bridge.sendMessage("不支持这样的文件播放");
+            return false;
+        }
+        return true;
     }
 
     private void streamClose() throws IOException {
@@ -373,9 +450,14 @@ public class AllMusicPlayer extends InputStream {
     }
 
     public void setReload() {
-        if (isPlay) {
-            reload = true;
-            isClose = true;
+        synchronized (tasks) {
+            if (isPlay && nowTask != null && nowTask.generation == generation) {
+                reload = true;
+                isClose = true;
+                if (activeRequest != null) {
+                    activeRequest.cancel();
+                }
+            }
         }
     }
 
@@ -412,6 +494,9 @@ public class AllMusicPlayer extends InputStream {
             local += temp;
             return temp;
         } catch (IOException e) {
+            if (isCancelled()) {
+                throw e;
+            }
             connect();
             return this.read(buf, off, len);
         }

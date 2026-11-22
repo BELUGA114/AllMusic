@@ -10,6 +10,10 @@
 
 </div>
 
+**[客户端玩家点歌屏蔽说明与命令](client/README.md)**
+
+**客户端请安装文件名带 `AllMusic_Client` 的 JAR，不要误装 `AllMusic_Server` 服务端包。**
+
 ![GIF.gif](img/GIF.gif)
 
 **注：需要配合客户端Mod使用**  

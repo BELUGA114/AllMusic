@@ -53,6 +53,9 @@ public class AllMusicCore {
      */
     private static AllMusicHud hud;
 
+    private static PlayerBlockStore blockStore;
+    private static BlockedMusicController blockController;
+
     public static final ScheduledExecutorService service = Executors.newScheduledThreadPool(4);
 
     /**
@@ -61,6 +64,9 @@ public class AllMusicCore {
     public static void tick() {
         if (player != null) {
             player.tick();
+        }
+        if (blockController != null) {
+            blockController.tick();
         }
     }
 
@@ -124,6 +130,30 @@ public class AllMusicCore {
 
         AllMusicCore.bridge = bridge;
         player = new AllMusicPlayer(source);
+        blockStore = new PlayerBlockStore(file);
+        blockController = new BlockedMusicController(AllMusicCore::getBlockSettings,
+                () -> System.nanoTime() / 1_000_000, new BlockedMusicController.Playback() {
+            @Override
+            public void play(String url, int position) {
+                bridge.stopPlayMusic();
+                player.setMusic(url, position);
+            }
+
+            @Override
+            public void stop() {
+                player.closePlayer();
+            }
+
+            @Override
+            public void seek(int position) {
+                player.setTime(position);
+            }
+
+            @Override
+            public void message(String text) {
+                bridge.sendFeedback(text);
+            }
+        });
 
         LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
         Configuration config = ctx.getConfiguration();
@@ -138,6 +168,9 @@ public class AllMusicCore {
     }
 
     public static void stop() {
+        if (blockStore != null) {
+            blockStore.close();
+        }
         service.close();
 
         if (player != null) {
@@ -170,6 +203,7 @@ public class AllMusicCore {
      */
     public static void onServerQuit() {
         try {
+            blockController.stop();
             stopPlaying();
         } catch (Exception e) {
             e.printStackTrace();
@@ -183,6 +217,18 @@ public class AllMusicCore {
     private static void stopPlaying() {
         player.closePlayer();
         hud.clear();
+    }
+
+    public static PlayerBlockSettings getBlockSettings() {
+        return blockStore.get(bridge.getServerKey());
+    }
+
+    public static PlayerBlockStore getBlockStore() {
+        return blockStore;
+    }
+
+    public static BlockedMusicController getBlockController() {
+        return blockController;
     }
 
     /**
@@ -216,10 +262,6 @@ public class AllMusicCore {
      * @param pack 数据
      */
     public static void packDo(MusicPack pack) {
-        if (pack.type == CommandType.PLAY) {
-            bridge.stopPlayMusic();
-        }
-
         switch (pack.type) {
             case LYRIC:
                 MusicPack.LyricMusicPack pack1 = (MusicPack.LyricMusicPack) pack;
@@ -231,18 +273,22 @@ public class AllMusicCore {
                 break;
             case INFO:
                 MusicPack.StringMusicPack pack3 = (MusicPack.StringMusicPack) pack;
-                hud.setInfo(pack3.data);
+                blockController.onInfo(pack3.data);
+                String status = blockController.isBlocked() ? "[本地已屏蔽] "
+                        : blockController.isWaiting() ? "[等待识别点歌者] " : "";
+                hud.setInfo(status + pack3.data);
                 break;
             case PLAY:
                 MusicPack.StringMusicPack pack5 = (MusicPack.StringMusicPack) pack;
                 stopPlaying();
-                player.setMusic(pack5.data);
+                blockController.onPlay(pack5.data);
                 break;
             case IMG:
                 MusicPack.StringMusicPack pack6 = (MusicPack.StringMusicPack) pack;
                 hud.setImg(pack6.data);
                 break;
             case STOP:
+                blockController.stop();
                 stopPlaying();
                 break;
             case CLEAR:
@@ -250,7 +296,7 @@ public class AllMusicCore {
                 break;
             case POS:
                 MusicPack.IntMusicPack pack7 = (MusicPack.IntMusicPack) pack;
-                player.setTime(pack7.data);
+                blockController.onPosition(pack7.data);
                 break;
             case HUD_DATA:
                 MusicPack.StringMusicPack pack8 = (MusicPack.StringMusicPack) pack;
@@ -261,6 +307,7 @@ public class AllMusicCore {
                 break;
             case TIME:
                 MusicPack.TimeMusicPack pack9 = (MusicPack.TimeMusicPack) pack;
+                blockController.onTime(pack9.now);
                 hud.setTime(pack9.time, pack9.now);
                 break;
         }
