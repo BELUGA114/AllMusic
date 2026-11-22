@@ -27,8 +27,9 @@ dependencies {
     shadowImplementation("org.apache.httpcomponents.core5:httpcore5-h2:${Versions.httpcore5_h2}")
 
     compileOnly("com.google.code.gson:gson:${Versions.gson}")
-    compileOnly("org.lwjgl.lwjgl:lwjgl:2.9.3")
-    compileOnly("org.apache.logging.log4j:log4j-core:2.25.4")
+    compileOnly("org.lwjgl:lwjgl:${Versions.lwjgl}")
+    compileOnly("org.lwjgl:lwjgl-openal:${Versions.lwjgl}")
+    compileOnly("org.apache.logging.log4j:log4j-core:${Versions.log4j}")
 }
 
 tasks.register("buildClient") {

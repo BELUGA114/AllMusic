@@ -13,33 +13,24 @@
 ![GIF.gif](img/GIF.gif)
 
 **注：需要配合客户端Mod使用**  
-**1.7.10和1.12.2没有技术更新**  
+**此分支仅支持 Minecraft 26.3 / Fabric，使用 JDK 25 和 Gradle 9.5.0。**
 **不兼容旧版客户端Mod，需要新版客户端Mod**  
 **如果面板服有问题，请自己去问服务器商给不给你用**
 **4.0服务器只能跟4.0客户端用，不兼容3.0的服务器或客户端**
 
-插件支持的服务器
-- Paper
-- Folia
-- Velocity
-
 模组支持的服务器
-- Forge
-- NeoForge
-- Fabric
+
+- Fabric 26.3
 
 ## 使用方法
 1. 安装AllMusic_Server
 
-Paper服务器  
-复制`[paper]AllMusic_Server-4.0.0.jar`到你的`plugins`文件夹  
-Velocity服务器  
-复制`[velocity]AllMusic_Server-4.0.0.jar`到你的`plugins`文件夹  
-Forge/Fabric/NeoForge类服务器  
-复制`[xxx-xxx]AllMusic_Server-4.0.0.jar`到你的`mods`文件夹  
+Fabric 26.3 服务器
+
+复制`[fabric-26.3]AllMusic_Server-4.2.5.jar`到你的`mods`文件夹
 
 2. 安装客户端mod
-复制`[xxx-xxx]AllMusic_Client-4.0.0`到客户端的`mods`文件夹
+复制`[fabric-26.3]AllMusic_Client-4.2.5.jar`到客户端的`mods`文件夹
 重启客户端
 
 如果你是单人游戏使用或者联机使用OneJar版本
@@ -54,6 +45,9 @@ AllMusic不会内置音乐api，你想要正常使用需要自己安装
 2. 使用 `git submodule update --init --recursive` 初始化项目
 3. 使用 `gradlew :server:buildServer` 构建服务器
 4. 使用 `gradlew :client:buildClient` 构建客户端
+5. 使用 `gradlew :onejar:buildOneJar` 构建合并包，或 `gradlew buildAll` 构建全部三个 Fabric 26.3 包
+
+构建产物位于 `build/`。只构建客户端也可以使用 `gradlew :client:fabric_26_3:build`。
 
 ## PAPI变量  
 > %allmusic_now_music_name% 歌曲名字  

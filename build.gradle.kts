@@ -24,17 +24,11 @@ allprojects {
 
     repositories {
         mavenCentral()
-        maven("https://oss.sonatype.org/content/groups/public/")
-        maven("https://s01.oss.sonatype.org/content/repositories/snapshots/")
-        maven("https://repo.codemc.io/repository/maven-releases/")
-        maven("https://repo.codemc.io/repository/maven-snapshots/")
-        maven("https://jitpack.io/")
-        maven("https://maven.izzel.io/releases/")
         maven("https://maven.maxhenkel.de/repository/public")
     }
 
     dependencies {
-        compileOnly("io.netty:netty-all:4.1.109.Final")
+        compileOnly("io.netty:netty-buffer:${Versions.netty}")
     }
 
     tasks.withType<ShadowJar> {
@@ -47,22 +41,6 @@ allprojects {
 
     tasks.named("jar") {
         dependsOn("shadowJar")
-    }
-
-    afterEvaluate {
-        if (plugins.hasPlugin("com.gtnewhorizons.retrofuturagradle")) return@afterEvaluate
-        if (plugins.hasPlugin("fabric-loom")) return@afterEvaluate
-
-        val rfgObfAttr = Attribute.of("com.gtnewhorizons.retrofuturagradle.obfuscation", String::class.java)
-        val rfgDeobfAttr = Attribute.of("rfgDeobfuscatorTransformed", Boolean::class.javaObjectType)
-        configurations.all {
-            if (!isCanBeConsumed) return@all
-
-            attributes {
-                attribute(rfgObfAttr, "mcp")
-                attribute(rfgDeobfAttr, true)
-            }
-        }
     }
 }
 
