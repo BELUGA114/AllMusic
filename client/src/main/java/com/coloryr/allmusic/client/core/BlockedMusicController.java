@@ -15,6 +15,7 @@ public class BlockedMusicController {
     }
 
     private static final long IDENTIFICATION_WAIT_MS = 1500;
+    private static final long POSITION_WAIT_MS = 2000;
     private final Supplier<PlayerBlockSettings> settings;
     private final LongSupplier clock;
     private final Playback playback;
@@ -26,6 +27,7 @@ public class BlockedMusicController {
     private long startedAt;
     private long position;
     private long positionAt;
+    private boolean waitingForPosition;
 
     public BlockedMusicController(Supplier<PlayerBlockSettings> settings, LongSupplier clock, Playback playback) {
         this.settings = settings;
@@ -34,8 +36,13 @@ public class BlockedMusicController {
     }
 
     public void onPlay(String nextUrl) {
+        onPlay(nextUrl, false);
+    }
+
+    public void onPlay(String nextUrl, boolean waitForPosition) {
         stop();
         url = nextUrl;
+        waitingForPosition = waitForPosition;
         startedAt = positionAt = clock.getAsLong();
         evaluate(false);
     }
@@ -53,14 +60,19 @@ public class BlockedMusicController {
             return;
         }
         updatePosition(nextPosition);
+        waitingForPosition = false;
         if (playing) {
             playback.seek(Math.max(0, nextPosition));
+        } else {
+            evaluate(false);
         }
     }
 
     public void onTime(long nextPosition) {
         if (url != null) {
             updatePosition(nextPosition);
+            // TIME 依赖进度 HUD 开关；重进优先等 POS，丢包时以 TIME 作为超时兜底。
+            evaluate(false);
         }
     }
 
@@ -103,6 +115,9 @@ public class BlockedMusicController {
             return;
         }
         if (!playing) {
+            if (isWaitingForPosition()) {
+                return;
+            }
             playing = true;
             long elapsed = Math.max(0, clock.getAsLong() - positionAt);
             int startPosition = (int) Math.min(Integer.MAX_VALUE, position + elapsed);
@@ -121,11 +136,16 @@ public class BlockedMusicController {
         playback.stop();
         url = requester = null;
         playing = blocked = unknownNotified = false;
+        waitingForPosition = false;
         position = 0;
     }
 
     public String getRequester() {
         return requester;
+    }
+
+    public boolean hasMusic() {
+        return url != null;
     }
 
     public boolean isBlocked() {
@@ -134,6 +154,10 @@ public class BlockedMusicController {
 
     public boolean isWaiting() {
         return url != null && !playing && !blocked;
+    }
+
+    public boolean isWaitingForPosition() {
+        return url != null && waitingForPosition && clock.getAsLong() - startedAt < POSITION_WAIT_MS;
     }
 
     public static String parseRequester(String info) {

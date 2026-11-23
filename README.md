@@ -108,6 +108,7 @@ AllMusic不会内置音乐api，你想要正常使用需要自己安装
     - addMusicCost         点歌花费
     - useCost              启用花费
 - sendDelay                Hud信息更新延迟
+- joinDelay                中途加入播放延迟，Fabric 单位为 tick，新配置默认 20（正常 TPS 下约 1 秒）；已有配置需手动调整
 - defaultApi               默认音乐API
 
 ## 指令说明

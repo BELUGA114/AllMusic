@@ -4,6 +4,8 @@ public class HudPicPosObj extends HudBasePosObj {
     public int size;
     public boolean rotate;
     public int speed;
+    // 旧服务端不发送此字段，缺省时保持原有唱片背景。
+    public boolean bg = true;
 
     public HudPicPosObj copy() {
         HudPicPosObj obj = new HudPicPosObj();
@@ -15,6 +17,7 @@ public class HudPicPosObj extends HudBasePosObj {
         obj.enable = enable;
         obj.alpha = alpha;
         obj.speed = speed;
+        obj.bg = bg;
         return obj;
     }
 }

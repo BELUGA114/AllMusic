@@ -214,6 +214,7 @@ public class AllMusicClient implements ClientModInitializer, AllMusicBridge, Pla
 
         AllMusicCore.init(FabricLoader.getInstance().getConfigDir(), this);
         blockCommands = new PlayerBlockCommands(this);
+        CommandMusicClientFabric.register();
 
         ClientLifecycleEvents.CLIENT_STOPPING.register((a) -> AllMusicCore.stop());
     }

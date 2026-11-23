@@ -12,5 +12,5 @@ public interface IDecoder {
 
     int getOutputChannels();
 
-    void set(int time);
+    void set(int time) throws Exception;
 }

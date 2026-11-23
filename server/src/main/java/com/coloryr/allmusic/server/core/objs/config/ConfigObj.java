@@ -100,7 +100,7 @@ public class ConfigObj {
      */
     public int sendDelay;
     /**
-     * 中途加入延迟
+     * 中途加入延迟，Fabric 下单位为 tick，20 tick 在正常 TPS 下约为 1 秒。
      */
     public int joinDelay;
     /**
@@ -177,7 +177,7 @@ public class ConfigObj {
         ktvLyricDelay = 0;
         lyricDelay = 0;
         sendDelay = 1000;
-        joinDelay = 1000;
+        joinDelay = 20;
         lyricReplace = new HashMap<>();
         version = AllMusic.configVersion;
     }

@@ -15,6 +15,7 @@ public class PlayerBlockFeatureTest {
         stopAndReplacePending();
         blockDuringPlayback();
         seekWhilePending();
+        joinSynchronization();
         settingsPersistence(Paths.get(args[0]));
         saveFailures(Paths.get(args[0]));
         commandRouting();
@@ -159,6 +160,45 @@ public class PlayerBlockFeatureTest {
             check(rejected, "损坏配置必须明确拒绝覆盖");
         }
         check(invalid.equals(new String(Files.readAllBytes(file), StandardCharsets.UTF_8)), "保留损坏的原始配置");
+    }
+
+    private static void joinSynchronization() {
+        Fixture joined = new Fixture();
+        joined.controller.onPlay("joined", true);
+        joined.controller.onInfo("by: Bob");
+        joined.controller.onTime(30000);
+        joined.advance(1000);
+        check(joined.plays.isEmpty(), "重进先等待 POS，避免从头启播再重连");
+        joined.controller.onPosition(31000);
+        check(joined.positions.equals(java.util.Collections.singletonList(31000)), "POS 到达后直接从当前进度启播");
+        check(joined.seeks.isEmpty(), "重进启播不额外触发 seek");
+
+        Fixture fallback = new Fixture();
+        fallback.controller.onPlay("lost-pos", true);
+        fallback.controller.onTime(45000);
+        fallback.advance(1999);
+        check(fallback.plays.isEmpty(), "缺失 POS 时等待期不能提前结束");
+        fallback.advance(1);
+        check(fallback.positions.get(0) == 47000, "缺失 POS 时按 TIME 和经过的时间兜底");
+        fallback.controller.onPosition(60000);
+        check(fallback.seeks.equals(java.util.Collections.singletonList(60000)), "超时后迟到的 POS 仍能校准");
+
+        Fixture blocked = new Fixture();
+        blocked.settings.add("Alice");
+        blocked.controller.onPlay("blocked-join", true);
+        blocked.controller.onPosition(10000);
+        blocked.controller.onInfo("by: Alice");
+        blocked.advance(5000);
+        check(blocked.plays.isEmpty(), "重进同步不能绕过黑名单");
+
+        Fixture stopped = new Fixture();
+        stopped.controller.onPlay("cancelled-join", true);
+        stopped.controller.stop();
+        stopped.controller.onPosition(10000);
+        stopped.advance(5000);
+        check(stopped.plays.isEmpty(), "断连不能使等待进度的歌曲复活");
+        stopped.controller.onPlay("new-song");
+        check(stopped.plays.size() == 1, "普通新歌不等待重进进度包");
     }
 
     private static void saveFailures(Path root) throws Exception {

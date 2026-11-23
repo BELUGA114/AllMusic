@@ -13,7 +13,10 @@ import java.awt.*;
 import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.*;
 
@@ -32,19 +35,33 @@ public class AllMusicHud {
     /**
      * 更新图片的链接
      */
-    private final Queue<String> urlList = new ConcurrentLinkedDeque<>();
+    private final Queue<PictureRequest> urlList = new ConcurrentLinkedDeque<>();
     /**
      * 更新锁，更新在子线程进行
      */
     private final Semaphore semaphore = new Semaphore(0);
+    private final Object imageLock = new Object();
+    private volatile long imageGeneration;
     /**
      * 图片大小
      */
-    private final int size;
+    private volatile int size;
     /**
      * 图片渲染
      */
-    private final PictureFrameBuffer picRender;
+    private PictureFrameBuffer picRender;
+    /**
+     * 新大小的图片渲染，等新图片上传时再替换，避免改大小后当前封面直接消失
+     */
+    private PictureFrameBuffer pendingPicRender;
+    /**
+     * 新渲染缓冲的大小
+     */
+    private int pendingSize;
+    /**
+     * 最后一张图片是用多大的尺寸生成的
+     */
+    private volatile int loadedSize;
     /**
      * 文字渲染
      */
@@ -73,19 +90,29 @@ public class AllMusicHud {
     private String lyricTran = "";
     private String lyricKtv = "";
     private long allTime, nowTime;
-    private HudPosObj save;
+    private volatile HudPosObj save;
     private float lyricState = 0.0f;
     private long lyricTime = -1;
     private int lyricWidth;
     private final int pgOffset;
     private final float picScale;
-    private BufferedImage bg2;
-    private boolean isRun;
+    /**
+     * 原始背景图，改图片大小时用来重新缩放
+     */
+    private final BufferedImage bg2Source;
+    private volatile BufferedImage bg2;
+    private volatile boolean isRun;
+    /**
+     * 最后一张图片的地址，改图片大小时重新拉取
+     * <p>
+     * 由下载线程写入、客户端线程读取，必须 volatile
+     */
+    private volatile String lastPicUrl;
 
     /**
      * 是否有图片
      */
-    private boolean haveImg;
+    private volatile boolean haveImg;
 
     /**
      * 旋转角度
@@ -95,7 +122,7 @@ public class AllMusicHud {
     /**
      * 是否需要更新材质
      */
-    private boolean imageNeedUpload;
+    private volatile boolean imageNeedUpload;
     /**
      * 是否需要文字
      */
@@ -136,17 +163,31 @@ public class AllMusicHud {
         offset = AllMusicCore.bridge.readText(PIC_SCALE);
         picScale = Float.parseFloat(offset);
 
+        BufferedImage source = null;
         try {
-            InputStream stream = AllMusicCore.bridge.readFile(BG2);
-            bg2 = resizeImage(ImageIO.read(stream), size, size);
+            try (InputStream stream = AllMusicCore.bridge.readFile(BG2)) {
+                source = ImageIO.read(stream);
+            }
+            if (source != null) {
+                bg2 = resizeImage(source, size, size);
+            }
         } catch (Exception e) {
             e.printStackTrace();
         }
+        bg2Source = source;
     }
 
     public void stop() {
+        if (!isRun) {
+            return;
+        }
         isRun = false;
         semaphore.release();
+        picRender.dispose();
+        if (pendingPicRender != null) {
+            pendingPicRender.dispose();
+            pendingPicRender = null;
+        }
     }
 
     public static BufferedImage resizeImage(BufferedImage originalImage, int targetWidth, int targetHeight) {
@@ -276,7 +317,13 @@ public class AllMusicHud {
     }
 
     public void clear() {
-        haveImg = false;
+        synchronized (imageLock) {
+            imageGeneration++;
+            haveImg = false;
+            imageNeedUpload = false;
+            lastPicUrl = null;
+            urlList.clear();
+        }
         info = lyric = lyricTran = lyricKtv = "";
         allTime = nowTime = 0;
 
@@ -320,19 +367,32 @@ public class AllMusicHud {
     /**
      * 加载图片
      *
-     * @param picUrl 加载地址
+     * @param task 加载地址及所属播放批次
      */
-    private void loadPic(String picUrl) {
-        haveImg = false;
+    private void loadPic(PictureRequest task) {
+        long generation = task.generation;
+        synchronized (imageLock) {
+            if (!isRun || generation != imageGeneration) {
+                return;
+            }
+            lastPicUrl = task.url;
+        }
         try {
-            while (save == null || imageNeedUpload) {
+            while (isRun && generation == imageGeneration && (save == null || imageNeedUpload)) {
                 Thread.sleep(200);
             }
-            if (!save.pic.enable) {
+            if (!isRun || generation != imageGeneration) {
+                return;
+            }
+            HudPosObj position = save;
+            if (position == null || !position.pic.enable) {
                 return;
             }
 
-            HttpGet request = new HttpGet(picUrl);
+            // 固定本次使用的尺寸，避免下载过程中被改掉，生成出一张和缓冲对不上的图
+            final int size = this.size;
+
+            HttpGet request = new HttpGet(task.url);
             BufferedImage image = AllMusicCore.client.execute(request, (response -> {
                 InputStream inputStream = response.getEntity().getContent();
                 return resizeImage(ImageIO.read(inputStream), size, size);
@@ -362,11 +422,23 @@ public class AllMusicHud {
             rotateImage = outputStream.toByteArray();
 
             request.clear();
-            imageNeedUpload = true;
+            synchronized (imageLock) {
+                // 退出或切歌后的旧下载结果不能重新出现在 HUD 上。
+                if (isRun && generation == imageGeneration) {
+                    loadedSize = size;
+                    imageNeedUpload = true;
+                }
+            }
         } catch (Exception e) {
+            if ((!isRun || generation != imageGeneration) && e instanceof IOException) {
+                // 已停止或被替换的下载中断不作为当前封面错误。
+                return;
+            }
             e.printStackTrace();
             AllMusicCore.bridge.sendMessage("图片解析错误");
-            haveImg = false;
+            if (generation == imageGeneration) {
+                haveImg = false;
+            }
         }
     }
 
@@ -374,6 +446,23 @@ public class AllMusicHud {
      * 更新材质
      */
     private void updateTexture() {
+        if (pendingPicRender != null) {
+            if (loadedSize != pendingSize) {
+                // 这张图是按旧尺寸生成的，缓冲对不上，丢掉重新拉一次
+                String url = lastPicUrl;
+                if (url != null && !url.isEmpty()) {
+                    setImg(url);
+                }
+                return;
+            }
+            PictureFrameBuffer old = picRender;
+            picRender = pendingPicRender;
+            pendingPicRender = null;
+            // 旧大小的贴图已经用不到了，释放掉
+            if (old != null) {
+                old.dispose();
+            }
+        }
         picRender.update(sourceImage, rotateImage);
         haveImg = true;
     }
@@ -395,9 +484,9 @@ public class AllMusicHud {
                     if (!isRun) {
                         return;
                     }
-                    String picUrl = urlList.poll();
-                    if (picUrl != null) {
-                        loadPic(picUrl);
+                    PictureRequest request = urlList.poll();
+                    if (request != null) {
+                        loadPic(request);
                     }
                 }
             } catch (Exception e) {
@@ -412,8 +501,23 @@ public class AllMusicHud {
      * @param picUrl 图片链接
      */
     public void setImg(String picUrl) {
-        urlList.add(picUrl);
+        synchronized (imageLock) {
+            if (!isRun) {
+                return;
+            }
+            urlList.add(new PictureRequest(picUrl, imageGeneration));
+        }
         semaphore.release();
+    }
+
+    private static final class PictureRequest {
+        private final String url;
+        private final long generation;
+
+        private PictureRequest(String url, long generation) {
+            this.url = url;
+            this.generation = generation;
+        }
     }
 
     /**
@@ -429,6 +533,119 @@ public class AllMusicHud {
 
         infoNeedUpdate = true;
         lyricNeedUpdate = true;
+
+        return true;
+    }
+
+    /**
+     * 获取图片大小
+     *
+     * @return 图片大小
+     */
+    public int getPicSize() {
+        return size;
+    }
+
+    /**
+     * 是否已经收到服务端的 HUD 数据
+     *
+     * @return 是否收到
+     */
+    public boolean hasHudData() {
+        return save != null;
+    }
+
+    /**
+     * 当前是否有封面可以显示
+     *
+     * @return 是否有封面
+     */
+    public boolean hasImage() {
+        return haveImg;
+    }
+
+    /**
+     * 最后加载的封面地址
+     *
+     * @return 封面地址
+     */
+    public String getLastPicUrl() {
+        return lastPicUrl;
+    }
+
+    /**
+     * 客户端自检信息
+     *
+     * @return 每一行结果，[OK] 正常，[!!] 异常
+     */
+    public List<String> getTestLines() {
+        List<String> list = new ArrayList<>();
+
+        list.add(check(size > 0, "图片缓冲: " + size + "x" + size
+                + (pendingPicRender != null ? "（有 " + pendingSize + " 的新缓冲待替换）" : "")));
+        list.add(check(bg1.width > 0 && bg1.height > 0, "底图 bg1.png: " + bg1.width + "x" + bg1.height));
+        list.add(check(bg3.width > 0 && bg3.height > 0, "唱臂 bg3.png: " + bg3.width + "x" + bg3.height));
+        list.add(check(progress1.width > 0 && progress1.height > 0,
+                "进度条 pg1.png: " + progress1.width + "x" + progress1.height));
+        list.add(check(progress2.width > 0 && progress2.height > 0,
+                "进度条 pg2.png: " + progress2.width + "x" + progress2.height));
+        list.add(check(progress3.width > 0 && progress3.height > 0,
+                "进度条 pg3.png: " + progress3.width + "x" + progress3.height));
+        list.add(check(bg2 != null, "封面圆环 bg2.png: "
+                + (bg2 == null ? "未加载" : bg2.getWidth() + "x" + bg2.getHeight())));
+        list.add(check(save != null, "服务端 HUD 数据: " + (save == null ? "未收到" : "已收到")));
+
+        if (save != null) {
+            list.add("  信息 " + enable(save.info.enable) + " / 歌词 " + enable(save.lyric.enable)
+                    + " / 进度 " + enable(save.state.enable) + " / 封面 " + enable(save.pic.enable));
+            list.add("  封面位置: " + save.pic.x + "," + save.pic.y + " 大小 " + save.pic.size
+                    + " 旋转 " + enable(save.pic.rotate));
+        }
+
+        list.add(check(haveImg, "当前封面: " + (haveImg ? "有" : "无")));
+
+        return list;
+    }
+
+    private static String check(boolean ok, String text) {
+        return (ok ? "[OK] " : "[!!] ") + text;
+    }
+
+    private static String enable(boolean value) {
+        return value ? "开" : "关";
+    }
+
+    /**
+     * 修改图片大小
+     * <p>
+     * 只在客户端本地改，不需要服务端配合。新大小的贴图缓冲会立刻建好，
+     * 等新图片上传（重新拉取当前封面，或者下一首歌的图片包）时替换掉旧的
+     *
+     * @param size 图片大小
+     * @return 是否修改成功
+     */
+    public boolean setPicSize(int size) {
+        if (size <= 0 || size == this.size) {
+            return false;
+        }
+
+        this.size = size;
+
+        if (bg2Source != null) {
+            bg2 = resizeImage(bg2Source, size, size);
+        }
+
+        if (pendingPicRender != null) {
+            pendingPicRender.dispose();
+        }
+        pendingPicRender = AllMusicCore.bridge.makePictureRender(size);
+        pendingSize = size;
+
+        // 重新拉一次当前封面，让新大小马上生效；没有封面时就等下一首歌
+        String url = lastPicUrl;
+        if (url != null && !url.isEmpty()) {
+            setImg(url);
+        }
 
         return true;
     }
@@ -618,19 +835,21 @@ public class AllMusicHud {
         }
 
         //需要更新材质
-        if (imageNeedUpload) {
-            imageNeedUpload = false;
-            updateTexture();
+        synchronized (imageLock) {
+            if (imageNeedUpload) {
+                updateTexture();
+                imageNeedUpload = false;
+            }
         }
         //绘制图片
         if (save.pic.enable && haveImg) {
-            if (save.pic.rotate) {
+            if (save.pic.bg && save.pic.rotate) {
                 bg1.drawPic(save.pic.x, save.pic.y, save.pic.size, save.pic.size, save.pic.pos, save.pic.alpha);
             }
 
             picRender.draw(save.pic.rotate, save.pic.size, save.pic.x, save.pic.y, ang, save.pic.pos, save.pic.alpha);
 
-            if (save.pic.rotate) {
+            if (save.pic.bg && save.pic.rotate) {
                 bg3.drawPic(save.pic.x, save.pic.y, save.pic.size, save.pic.size, save.pic.pos, save.pic.alpha);
             }
         }

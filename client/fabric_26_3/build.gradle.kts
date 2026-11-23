@@ -9,7 +9,7 @@ val verifyBlockCommands by tasks.registering(JavaExec::class) {
     mainClass.set("com.coloryr.allmusic.client.PlayerBlockCommandsTest")
 }
 
-tasks.check { dependsOn(verifyBlockCommands, project(":client").tasks.named("verifyPlayerBlock")) }
+tasks.check { dependsOn(verifyBlockCommands, project(":client").tasks.named("check")) }
 
 tasks.test { exclude("**/PlayerBlockCommandsTest*.class") }
 

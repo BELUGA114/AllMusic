@@ -12,18 +12,18 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.message.BasicHeader;
-import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.core.LoggerContext;
-import org.apache.logging.log4j.core.config.Configuration;
-import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.Logger;
 
 import java.io.*;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -33,6 +33,10 @@ import java.util.concurrent.ScheduledExecutorService;
  */
 public class AllMusicCore {
     public static final CommandType[] types = CommandType.values();
+    public static final int MIN_PIC_SIZE = 16;
+    public static final int MAX_PIC_SIZE = 1024;
+    public static final List<String> DEFAULT_LOG_QUIET = Arrays.asList("org.apache.hc.client5", "org.apache.hc.core5");
+    private static final Logger LOGGER = LogManager.getLogger(AllMusicCore.class);
 
     private static final Gson gson = new Gson();
     /**
@@ -52,6 +56,9 @@ public class AllMusicCore {
      * 界面显示内容
      */
     private static AllMusicHud hud;
+    private static Path configFile;
+    private static boolean configWritable;
+    private static boolean waitingForJoinPosition;
 
     private static PlayerBlockStore blockStore;
     private static BlockedMusicController blockController;
@@ -96,37 +103,7 @@ public class AllMusicCore {
         headers.add(new BasicHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"));
         client = HttpClients.custom().setDefaultHeaders(headers).build();
 
-        File configFile = new File(file.toFile(), "allmusic_client.json");
-        if (configFile.exists()) {
-            try {
-                InputStreamReader reader = new InputStreamReader(
-                        Files.newInputStream(configFile.toPath()),
-                        StandardCharsets.UTF_8);
-                BufferedReader bf = new BufferedReader(reader);
-                config = new Gson().fromJson(bf, ConfigObj.class);
-                bf.close();
-                reader.close();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-        if (config == null) {
-            config = new ConfigObj();
-            config.picSize = 120;
-            config.queueSize = 100;
-            try {
-                String data = new GsonBuilder().setPrettyPrinting()
-                        .create()
-                        .toJson(config);
-                FileOutputStream out = new FileOutputStream(configFile);
-                OutputStreamWriter write = new OutputStreamWriter(out, StandardCharsets.UTF_8);
-                write.write(data);
-                write.close();
-                out.close();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
+        loadConfig(file);
 
         AllMusicCore.bridge = bridge;
         player = new AllMusicPlayer(source);
@@ -155,16 +132,60 @@ public class AllMusicCore {
             }
         });
 
-        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
-        Configuration config = ctx.getConfiguration();
+        ClientLogLevels.apply(config.logQuiet);
+    }
 
-        LoggerConfig loggerConfig = config.getLoggerConfig("org.apache.hc.client5");
-        loggerConfig.setLevel(Level.INFO);
+    static void loadConfig(Path directory) {
+        configFile = directory.resolve("allmusic_client.json");
+        configWritable = true;
+        config = null;
+        if (Files.exists(configFile)) {
+            try (Reader reader = Files.newBufferedReader(configFile, StandardCharsets.UTF_8)) {
+                config = gson.fromJson(reader, ConfigObj.class);
+                if (config == null || config.picSize < MIN_PIC_SIZE || config.picSize > MAX_PIC_SIZE
+                        || config.queueSize <= 0) {
+                    throw new IllegalArgumentException("客户端配置无效");
+                }
+            } catch (IOException | RuntimeException e) {
+                configWritable = false;
+                config = null;
+                LOGGER.error("无法读取客户端配置 {}，保留原文件", configFile, e);
+            }
+        }
+        if (config == null) {
+            config = new ConfigObj();
+            config.picSize = 240;
+            config.queueSize = 100;
+        }
+        if (config.logQuiet == null) {
+            config.logQuiet = new ArrayList<>(DEFAULT_LOG_QUIET);
+        }
+        if (configWritable && !Files.exists(configFile)) {
+            try {
+                saveConfig();
+            } catch (IOException e) {
+                LOGGER.error("无法保存客户端默认配置 {}", configFile, e);
+            }
+        }
+    }
 
-        LoggerConfig coreConfig = config.getLoggerConfig("org.apache.hc.core5");
-        coreConfig.setLevel(Level.INFO);
-
-        ctx.updateLoggers(config);
+    private static void saveConfig() throws IOException {
+        if (!configWritable) {
+            throw new IOException("客户端配置无法读取，请修复原文件后重启");
+        }
+        Files.createDirectories(configFile.getParent());
+        Path temporary = Files.createTempFile(configFile.getParent(), "allmusic_client_", ".tmp");
+        try {
+            String data = new GsonBuilder().setPrettyPrinting().create().toJson(config);
+            Files.write(temporary, data.getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(temporary, configFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temporary, configFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     public static void stop() {
@@ -198,25 +219,93 @@ public class AllMusicCore {
         hud = new AllMusicHud(config.picSize);
     }
 
+    public static int getPicSize() {
+        return config == null ? 0 : config.picSize;
+    }
+
+    public static boolean setPicSize(int size) {
+        if (config == null || size < MIN_PIC_SIZE || size > MAX_PIC_SIZE) {
+            return false;
+        }
+        int previous = config.picSize;
+        config.picSize = size;
+        try {
+            saveConfig();
+        } catch (IOException e) {
+            config.picSize = previous;
+            throw new IllegalStateException("无法保存封面设置，请检查客户端配置文件和目录权限", e);
+        }
+        if (hud != null) {
+            hud.setPicSize(size);
+        }
+        return true;
+    }
+
+    public static List<String> getInfoLines() {
+        List<String> lines = new ArrayList<>();
+        lines.add("配置文件: config/allmusic_client.json");
+        lines.add("兼容服务端版本: 4.2.5 / Fabric 26.3");
+        lines.add("图片大小 picSize: " + getPicSize() + "（范围 " + MIN_PIC_SIZE + "-" + MAX_PIC_SIZE + "）");
+        lines.add("音频队列: " + (config == null ? 0 : config.queueSize));
+        lines.add("配置可保存: " + configWritable);
+        lines.add("HUD 渲染层: " + (hud == null ? "未初始化" : "已初始化"));
+        if (hud != null) {
+            lines.add("HUD 数据: " + (hud.hasHudData() ? "已收到" : "未收到"));
+            lines.add("当前封面: " + (hud.hasImage() ? "有，尺寸 " + hud.getPicSize() : "无"));
+        }
+        lines.add("播放状态: " + (isPlay() ? "播放中" : "未播放"));
+        if (blockController != null) {
+            lines.add("本地屏蔽: " + blockController.isBlocked() + " / 等待进度: " + blockController.isWaitingForPosition());
+        }
+        return lines;
+    }
+
+    public static List<String> getTestLines() {
+        List<String> lines = new ArrayList<>();
+        lines.add(check(config != null, "核心配置"));
+        lines.add(check(bridge != null, "游戏桥"));
+        lines.add(check(client != null, "网络客户端"));
+        lines.add(check(player != null, "音频播放器"));
+        lines.add(check(hud != null, "HUD 渲染层"));
+        lines.add(check(configWritable, "客户端配置可保存"));
+        if (hud != null) {
+            lines.addAll(hud.getTestLines());
+        }
+        return lines;
+    }
+
+    private static String check(boolean success, String text) {
+        return (success ? "[OK] " : "[!!] ") + text;
+    }
+
     /**
      * 退出服务器时
      */
     public static void onServerQuit() {
+        waitingForJoinPosition = false;
         try {
-            blockController.stop();
+            if (blockController != null) {
+                blockController.stop();
+            }
             stopPlaying();
         } catch (Exception e) {
             e.printStackTrace();
         }
-        hud.close();
+        if (hud != null) {
+            hud.close();
+        }
     }
 
     /**
      * 停止播放
      */
     private static void stopPlaying() {
-        player.closePlayer();
-        hud.clear();
+        if (player != null) {
+            player.closePlayer();
+        }
+        if (hud != null) {
+            hud.clear();
+        }
     }
 
     public static PlayerBlockSettings getBlockSettings() {
@@ -244,7 +333,9 @@ public class AllMusicCore {
      * 更新显示内容
      */
     public static void hudUpdate() {
-        hud.update();
+        if (hud != null) {
+            hud.update();
+        }
     }
 
     /**
@@ -253,6 +344,9 @@ public class AllMusicCore {
      * @param buffer 数据包
      */
     public static void packRead(ByteBuf buffer) {
+        if (buffer == null || !buffer.isReadable()) {
+            return;
+        }
         packDo(MusicPacketCodec.decode(buffer));
     }
 
@@ -275,19 +369,22 @@ public class AllMusicCore {
                 MusicPack.StringMusicPack pack3 = (MusicPack.StringMusicPack) pack;
                 blockController.onInfo(pack3.data);
                 String status = blockController.isBlocked() ? "[本地已屏蔽] "
+                        : blockController.isWaitingForPosition() ? "[等待同步进度] "
                         : blockController.isWaiting() ? "[等待识别点歌者] " : "";
                 hud.setInfo(status + pack3.data);
                 break;
             case PLAY:
                 MusicPack.StringMusicPack pack5 = (MusicPack.StringMusicPack) pack;
                 stopPlaying();
-                blockController.onPlay(pack5.data);
+                blockController.onPlay(pack5.data, waitingForJoinPosition);
+                waitingForJoinPosition = false;
                 break;
             case IMG:
                 MusicPack.StringMusicPack pack6 = (MusicPack.StringMusicPack) pack;
                 hud.setImg(pack6.data);
                 break;
             case STOP:
+                waitingForJoinPosition = false;
                 blockController.stop();
                 stopPlaying();
                 break;
@@ -300,9 +397,13 @@ public class AllMusicCore {
                 break;
             case HUD_DATA:
                 MusicPack.StringMusicPack pack8 = (MusicPack.StringMusicPack) pack;
+                boolean initialHud = !hud.hasHudData();
                 boolean fail = hud.setPos(gson.fromJson(pack8.data, HudPosObj.class));
                 if (!fail) {
                     bridge.kick();
+                } else if (initialHud && !blockController.hasMusic()) {
+                    // 旧服务端中途加入时先发 HUD_DATA，再发 PLAY，最后单独同步进度。
+                    waitingForJoinPosition = true;
                 }
                 break;
             case TIME:
